@@ -1,1 +1,850 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Змейка - Мультиплеер</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+            background: #111;
+            color: white;
+        }
+        
+        #game-container {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+        }
+        
+        #score-board {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 100;
+        }
+        
+        #start-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 200;
+        }
+        
+        #start-screen h1 {
+            font-size: 3em;
+            margin-bottom: 20px;
+            color: #4CAF50;
+        }
+        
+        button {
+            padding: 15px 30px;
+            font-size: 1.2em;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 10px;
+        }
+        
+        button:hover {
+            background: #45a049;
+        }
+        
+        #player-name {
+            padding: 10px;
+            font-size: 1em;
+            margin-bottom: 20px;
+            width: 200px;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container"></div>
+    <div id="score-board">
+        <h2>Счет</h2>
+        <div id="scores"></div>
+    </div>
+    
+    <div id="start-screen">
+        <h1>3D Змейка</h1>
+        <input type="text" id="player-name" placeholder="Введите ваше имя" maxlength="10">
+        <button id="start-single">Одиночная игра</button>
+        <button id="start-multi">Мультиплеер</button>
+    </div>
 
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script>
+        // Основные переменные
+        let scene, camera, renderer;
+        let snakes = {};
+        let apples = [];
+        let playerId = null;
+        let playerName = "";
+        let isMultiplayer = false;
+        let socket = null;
+        let gridSize = 20;
+        let cellSize = 1;
+        let gameStarted = false;
+        
+        // Инициализация игры
+        function init() {
+            // Создание сцены
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x111111);
+            
+            // Создание камеры
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(gridSize/2, gridSize, gridSize/2);
+            camera.lookAt(gridSize/2, 0, gridSize/2);
+            
+            // Создание рендерера
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('game-container').appendChild(renderer.domElement);
+            
+            // Освещение
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+            
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(gridSize/2, gridSize, gridSize/2);
+            scene.add(directionalLight);
+            
+            // Сетка поля
+            createGrid();
+            
+            // Обработчики событий
+            window.addEventListener('resize', onWindowResize);
+            document.addEventListener('keydown', onKeyDown);
+            
+            // Кнопки старта
+            document.getElementById('start-single').addEventListener('click', startSinglePlayer);
+            document.getElementById('start-multi').addEventListener('click', startMultiPlayer);
+            
+            // Анимация
+            animate();
+        }
+        
+        // Создание сетки поля
+        function createGrid() {
+            const gridHelper = new THREE.GridHelper(gridSize, gridSize, 0x555555, 0x333333);
+            scene.add(gridHelper);
+        }
+        
+        // Запуск одиночной игры
+        function startSinglePlayer() {
+            playerName = document.getElementById('player-name').value || "Игрок";
+            isMultiplayer = false;
+            startGame();
+        }
+        
+        // Запуск мультиплеера
+        function startMultiPlayer() {
+            playerName = document.getElementById('player-name').value || "Игрок";
+            isMultiplayer = true;
+            
+            // Подключение к серверу Socket.io
+            socket = io('https://snake-multiplayer-server.example.com'); // Замените на ваш сервер
+            
+            socket.on('connect', () => {
+                playerId = socket.id;
+                socket.emit('join', { name: playerName });
+                startGame();
+            });
+            
+            socket.on('gameState', (gameState) => {
+                updateGameState(gameState);
+            });
+            
+            socket.on('playerJoined', (player) => {
+                addSnake(player.id, player.name, player.color, player.body);
+            });
+            
+            socket.on('playerLeft', (playerId) => {
+                removeSnake(playerId);
+            });
+        }
+        
+        // Начало игры
+        function startGame() {
+            document.getElementById('start-screen').style.display = 'none';
+            gameStarted = true;
+            
+            if (!isMultiplayer) {
+                // Создание змейки игрока
+                const initialBody = [
+                    { x: Math.floor(gridSize/2), y: 0, z: Math.floor(gridSize/2) },
+                    { x: Math.floor(gridSize/2)-1, y: 0, z: Math.floor(gridSize/2) }
+                ];
+                
+                playerId = "single-player";
+                addSnake(playerId, playerName, getRandomColor(), initialBody);
+                
+                // Создание яблока
+                spawnApple();
+                
+                // ИИ змейки (для одиночной игры)
+                if (isMultiplayer === false) {
+                    for (let i = 0; i < 2; i++) {
+                        const aiId = "ai-" + i;
+                        const aiInitialBody = [
+                            { x: 2 + i*5, y: 0, z: 2 + i*5 },
+                            { x: 1 + i*5, y: 0, z: 2 + i*5 }
+                        ];
+                        addSnake(aiId, "AI " + (i+1), getRandomColor(), aiInitialBody);
+                    }
+                }
+            }
+        }
+        
+        // Добавление змейки
+        function addSnake(id, name, color, body) {
+            const snake = {
+                id: id,
+                name: name,
+                color: color,
+                body: body,
+                direction: { x: 1, y: 0, z: 0 },
+                nextDirection: { x: 1, y: 0, z: 0 },
+                cubes: [],
+                score: 0
+            };
+            
+            // Создание 3D модели змейки
+            for (let i = 0; i < body.length; i++) {
+                const segment = body[i];
+                const geometry = new THREE.BoxGeometry(cellSize * 0.9, cellSize * 0.9, cellSize * 0.9);
+                const material = new THREE.MeshPhongMaterial({ 
+                    color: new THREE.Color(color),
+                    emissive: new THREE.Color(color).multiplyScalar(0.2)
+                });
+                
+                const cube = new THREE.Mesh(geometry, material);
+                cube.position.set(segment.x + 0.5, segment.y + 0.5, segment.z + 0.5);
+                scene.add(cube);
+                snake.cubes.push(cube);
+            }
+            
+            // Голова другого цвета
+            if (snake.cubes.length > 0) {
+                snake.cubes[0].material.color.setHex(0xffffff);
+            }
+            
+            snakes[id] = snake;
+            updateScoreboard();
+        }
+        
+        // Удаление змейки
+        function removeSnake(id) {
+            if (snakes[id]) {
+                // Удаление 3D модели
+                for (const cube of snakes[id].cubes) {
+                    scene.remove(cube);
+                }
+                delete snakes[id];
+                updateScoreboard();
+            }
+        }
+        
+        // Создание яблока
+        function spawnApple() {
+            // Генерация случайной позиции
+            let x, z;
+            let positionValid = false;
+            
+            while (!positionValid) {
+                x = Math.floor(Math.random() * gridSize);
+                z = Math.floor(Math.random() * gridSize);
+                positionValid = true;
+                
+                // Проверка, что позиция не занята змейкой
+                for (const snakeId in snakes) {
+                    for (const segment of snakes[snakeId].body) {
+                        if (segment.x === x && segment.z === z) {
+                            positionValid = false;
+                            break;
+                        }
+                    }
+                    if (!positionValid) break;
+                }
+                
+                // Проверка, что позиция не занята другим яблоком
+                for (const apple of apples) {
+                    if (apple.x === x && apple.z === z) {
+                        positionValid = false;
+                        break;
+                    }
+                }
+            }
+            
+            // Создание 3D модели яблока
+            const geometry = new THREE.SphereGeometry(cellSize * 0.4, 16, 16);
+            const material = new THREE.MeshPhongMaterial({ 
+                color: 0xff0000,
+                emissive: 0x330000
+            });
+            const appleMesh = new THREE.Mesh(geometry, material);
+            appleMesh.position.set(x + 0.5, 0.5, z + 0.5);
+            scene.add(appleMesh);
+            
+            apples.push({
+                x: x,
+                z: z,
+                mesh: appleMesh
+            });
+        }
+        
+        // Обновление игрового состояния (для мультиплеера)
+        function updateGameState(gameState) {
+            // Обновление змеек
+            for (const snakeId in gameState.snakes) {
+                if (!snakes[snakeId] && snakeId !== playerId) {
+                    addSnake(snakeId, gameState.snakes[snakeId].name, gameState.snakes[snakeId].color, gameState.snakes[snakeId].body);
+                } else if (snakes[snakeId]) {
+                    // Обновление позиции
+                    const snake = snakes[snakeId];
+                    const newBody = gameState.snakes[snakeId].body;
+                    
+                    // Удаление лишних сегментов
+                    while (snake.cubes.length > newBody.length) {
+                        scene.remove(snake.cubes.pop());
+                    }
+                    
+                    // Добавление недостающих сегментов
+                    while (snake.cubes.length < newBody.length) {
+                        const geometry = new THREE.BoxGeometry(cellSize * 0.9, cellSize * 0.9, cellSize * 0.9);
+                        const material = new THREE.MeshPhongMaterial({ 
+                            color: new THREE.Color(snake.color),
+                            emissive: new THREE.Color(snake.color).multiplyScalar(0.2)
+                        });
+                        const cube = new THREE.Mesh(geometry, material);
+                        scene.add(cube);
+                        snake.cubes.push(cube);
+                    }
+                    
+                    // Обновление позиций
+                    for (let i = 0; i < newBody.length; i++) {
+                        snake.cubes[i].position.set(newBody[i].x + 0.5, newBody[i].y + 0.5, newBody[i].z + 0.5);
+                    }
+                    
+                    // Обновление головы
+                    if (snake.cubes.length > 0) {
+                        snake.cubes[0].material.color.setHex(snakeId === playerId ? 0xffffff : 0xdddddd);
+                    }
+                    
+                    snake.body = newBody;
+                    snake.score = gameState.snakes[snakeId].score;
+                }
+            }
+            
+            // Удаление отсутствующих змеек
+            for (const snakeId in snakes) {
+                if (!gameState.snakes[snakeId] && snakeId !== playerId) {
+                    removeSnake(snakeId);
+                }
+            }
+            
+            // Обновление яблок
+            while (apples.length > 0) {
+                scene.remove(apples.pop().mesh);
+            }
+            
+            for (const apple of gameState.apples) {
+                const geometry = new THREE.SphereGeometry(cellSize * 0.4, 16, 16);
+                const material = new THREE.MeshPhongMaterial({ 
+                    color: 0xff0000,
+                    emissive: 0x330000
+                });
+                const appleMesh = new THREE.Mesh(geometry, material);
+                appleMesh.position.set(apple.x + 0.5, 0.5, apple.z + 0.5);
+                scene.add(appleMesh);
+                
+                apples.push({
+                    x: apple.x,
+                    z: apple.z,
+                    mesh: appleMesh
+                });
+            }
+            
+            updateScoreboard();
+        }
+        
+        // Обновление табло счета
+        function updateScoreboard() {
+            const scoresElement = document.getElementById('scores');
+            scoresElement.innerHTML = '';
+            
+            const sortedSnakes = Object.values(snakes).sort((a, b) => b.score - a.score);
+            
+            for (const snake of sortedSnakes) {
+                const scoreElement = document.createElement('div');
+                scoreElement.style.color = snake.color;
+                scoreElement.textContent = `${snake.name}: ${snake.score}`;
+                scoresElement.appendChild(scoreElement);
+            }
+        }
+        
+        // Обработка нажатий клавиш
+        function onKeyDown(event) {
+            if (!gameStarted || !playerId || !snakes[playerId]) return;
+            
+            const snake = snakes[playerId];
+            
+            switch(event.key) {
+                case 'ArrowUp':
+                    if (snake.direction.z === 0) snake.nextDirection = { x: 0, y: 0, z: -1 };
+                    break;
+                case 'ArrowDown':
+                    if (snake.direction.z === 0) snake.nextDirection = { x: 0, y: 0, z: 1 };
+                    break;
+                case 'ArrowLeft':
+                    if (snake.direction.x === 0) snake.nextDirection = { x: -1, y: 0, z: 0 };
+                    break;
+                case 'ArrowRight':
+                    if (snake.direction.x === 0) snake.nextDirection = { x: 1, y: 0, z: 0 };
+                    break;
+            }
+            
+            if (isMultiplayer && socket) {
+                socket.emit('direction', snake.nextDirection);
+            }
+        }
+        
+        // ИИ для компьютерных змеек (в одиночной игре)
+        function updateAI() {
+            for (const snakeId in snakes) {
+                if (snakeId.startsWith('ai-')) {
+                    const snake = snakes[snakeId];
+                    const head = snake.body[0];
+                    
+                    // Простой ИИ: движение к ближайшему яблоку
+                    if (apples.length > 0) {
+                        const apple = apples[0];
+                        const dx = apple.x - head.x;
+                        const dz = apple.z - head.z;
+                        
+                        // Предпочитаем движение по одной оси
+                        if (Math.abs(dx) > Math.abs(dz)) {
+                            if (dx > 0 && snake.direction.x === 0) {
+                                snake.nextDirection = { x: 1, y: 0, z: 0 };
+                            } else if (dx < 0 && snake.direction.x === 0) {
+                                snake.nextDirection = { x: -1, y: 0, z: 0 };
+                            }
+                        } else {
+                            if (dz > 0 && snake.direction.z === 0) {
+                                snake.nextDirection = { x: 0, y: 0, z: 1 };
+                            } else if (dz < 0 && snake.direction.z === 0) {
+                                snake.nextDirection = { x: 0, y: 0, z: -1 };
+                            }
+                        }
+                    }
+                    
+                    // Избегание стен
+                    if ((head.x <= 0 && snake.direction.x === -1) || 
+                        (head.x >= gridSize-1 && snake.direction.x === 1)) {
+                        snake.nextDirection = { x: 0, y: 0, z: Math.random() > 0.5 ? 1 : -1 };
+                    }
+                    
+                    if ((head.z <= 0 && snake.direction.z === -1) || 
+                        (head.z >= gridSize-1 && snake.direction.z === 1)) {
+                        snake.nextDirection = { x: Math.random() > 0.5 ? 1 : -1, y: 0, z: 0 };
+                    }
+                }
+            }
+        }
+        
+        // Игровой цикл
+        function gameLoop() {
+            if (!gameStarted) return;
+            
+            // Обновление ИИ в одиночной игре
+            if (!isMultiplayer) {
+                updateAI();
+            }
+            
+            // Обновление всех змеек
+            for (const snakeId in snakes) {
+                const snake = snakes[snakeId];
+                
+                // Обновление направления
+                snake.direction = { ...snake.nextDirection };
+                
+                // Перемещение головы
+                const head = snake.body[0];
+                const newHead = {
+                    x: head.x + snake.direction.x,
+                    y: head.y + snake.direction.y,
+                    z: head.z + snake.direction.z
+                };
+                
+                // Проверка столкновений со стенами
+                if (newHead.x < 0 || newHead.x >= gridSize || 
+                    newHead.z < 0 || newHead.z >= gridSize) {
+                    if (isMultiplayer) {
+                        if (snakeId === playerId) {
+                            socket.emit('collision');
+                        }
+                    } else {
+                        // Перезапуск змейки ИИ
+                        if (snakeId.startsWith('ai-')) {
+                            const initialBody = [
+                                { x: Math.floor(Math.random() * gridSize/2), y: 0, z: Math.floor(Math.random() * gridSize/2) },
+                                { x: Math.floor(Math.random() * gridSize/2)-1, y: 0, z: Math.floor(Math.random() * gridSize/2) }
+                            ];
+                            snake.body = initialBody;
+                            snake.direction = { x: 1, y: 0, z: 0 };
+                            snake.nextDirection = { x: 1, y: 0, z: 0 };
+                            snake.score = 0;
+                            
+                            // Перемещение кубов
+                            for (let i = 0; i < snake.cubes.length; i++) {
+                                if (i < initialBody.length) {
+                                    snake.cubes[i].position.set(initialBody[i].x + 0.5, initialBody[i].y + 0.5, initialBody[i].z + 0.5);
+                                } else {
+                                    scene.remove(snake.cubes[i]);
+                                }
+                            }
+                            snake.cubes = snake.cubes.slice(0, initialBody.length);
+                            continue;
+                        } else {
+                            // Конец игры для игрока
+                            alert(`Игра окончена! Ваш счет: ${snake.score}`);
+                            resetGame();
+                            return;
+                        }
+                    }
+                }
+                
+                // Проверка столкновений с другими змейками
+                for (const otherSnakeId in snakes) {
+                    const otherSnake = snakes[otherSnakeId];
+                    
+                    for (let i = 0; i < otherSnake.body.length; i++) {
+                        // Не проверяем столкновение с собственной головой
+                        if (otherSnakeId === snakeId && i === 0) continue;
+                        
+                        const segment = otherSnake.body[i];
+                        if (newHead.x === segment.x && newHead.z === segment.z) {
+                            if (isMultiplayer) {
+                                if (snakeId === playerId) {
+                                    socket.emit('collision');
+                                }
+                            } else {
+                                if (snakeId.startsWith('ai-')) {
+                                    // Перезапуск змейки ИИ
+                                    const initialBody = [
+                                        { x: Math.floor(Math.random() * gridSize/2), y: 0, z: Math.floor(Math.random() * gridSize/2) },
+                                        { x: Math.floor(Math.random() * gridSize/2)-1, y: 0, z: Math.floor(Math.random() * gridSize/2) }
+                                    ];
+                                    snake.body = initialBody;
+                                    snake.direction = { x: 1, y: 0, z: 0 };
+                                    snake.nextDirection = { x: 1, y: 0, z: 0 };
+                                    snake.score = 0;
+                                    
+                                    // Перемещение кубов
+                                    for (let i = 0; i < snake.cubes.length; i++) {
+                                        if (i < initialBody.length) {
+                                            snake.cubes[i].position.set(initialBody[i].x + 0.5, initialBody[i].y + 0.5, initialBody[i].z + 0.5);
+                                        } else {
+                                            scene.remove(snake.cubes[i]);
+                                        }
+                                    }
+                                    snake.cubes = snake.cubes.slice(0, initialBody.length);
+                                    continue;
+                                } else {
+                                    // Конец игры для игрока
+                                    alert(`Игра окончена! Ваш счет: ${snake.score}`);
+                                    resetGame();
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Проверка съедения яблока
+                let appleEaten = -1;
+                for (let i = 0; i < apples.length; i++) {
+                    if (newHead.x === apples[i].x && newHead.z === apples[i].z) {
+                        appleEaten = i;
+                        break;
+                    }
+                }
+                
+                if (appleEaten !== -1) {
+                    // Увеличение змейки
+                    snake.body.unshift(newHead);
+                    snake.score++;
+                    
+                    // Создание нового куба для сегмента
+                    const geometry = new THREE.BoxGeometry(cellSize * 0.9, cellSize * 0.9, cellSize * 0.9);
+                    const material = new THREE.MeshPhongMaterial({ 
+                        color: new THREE.Color(snake.color),
+                        emissive: new THREE.Color(snake.color).multiplyScalar(0.2)
+                    });
+                    const cube = new THREE.Mesh(geometry, material);
+                    cube.position.set(newHead.x + 0.5, newHead.y + 0.5, newHead.z + 0.5);
+                    scene.add(cube);
+                    snake.cubes.unshift(cube);
+                    
+                    // Обновление цвета головы
+                    if (snake.cubes.length > 0) {
+                        snake.cubes[0].material.color.setHex(snakeId === playerId ? 0xffffff : 0xdddddd);
+                    }
+                    
+                    // Удаление съеденного яблока
+                    scene.remove(apples[appleEaten].mesh);
+                    apples.splice(appleEaten, 1);
+                    
+                    // Создание нового яблока
+                    if (!isMultiplayer) {
+                        spawnApple();
+                    } else if (snakeId === playerId) {
+                        socket.emit('eatApple');
+                    }
+                } else {
+                    // Обычное движение
+                    snake.body.unshift(newHead);
+                    const tail = snake.body.pop();
+                    
+                    // Обновление позиции кубов
+                    for (let i = 0; i < snake.cubes.length; i++) {
+                        snake.cubes[i].position.set(snake.body[i].x + 0.5, snake.body[i].y + 0.5, snake.body[i].z + 0.5);
+                    }
+                    
+                    // Обновление цвета головы
+                    if (snake.cubes.length > 0) {
+                        snake.cubes[0].material.color.setHex(snakeId === playerId ? 0xffffff : 0xdddddd);
+                    }
+                }
+            }
+            
+            updateScoreboard();
+            
+            // В мультиплеере состояние обновляется с сервера
+            if (!isMultiplayer) {
+                // Проверка, нужно ли добавить новое яблоко
+                if (apples.length < 3 && Math.random() < 0.05) {
+                    spawnApple();
+                }
+            }
+        }
+        
+        // Сброс игры
+        function resetGame() {
+            // Удаление всех змеек
+            for (const snakeId in snakes) {
+                removeSnake(snakeId);
+            }
+            
+            // Удаление всех яблок
+            while (apples.length > 0) {
+                scene.remove(apples.pop().mesh);
+            }
+            
+            // Сброс состояния
+            playerId = null;
+            gameStarted = false;
+            
+            // Показ стартового экрана
+            document.getElementById('start-screen').style.display = 'flex';
+            
+            // Отключение от сервера в мультиплеере
+            if (isMultiplayer && socket) {
+                socket.disconnect();
+                socket = null;
+            }
+            
+            isMultiplayer = false;
+        }
+        
+        // Обработка изменения размера окна
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        // Анимация
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+        
+        // Игровой таймер
+        setInterval(gameLoop, 150);
+        
+        // Вспомогательная функция для получения случайного цвета
+        function getRandomColor() {
+            const colors = [
+                0xff0000, 0x00ff00, 0x0000ff, 0xffff00, 0xff00ff, 0x00ffff,
+                0xff9900, 0x9900ff, 0x00ff99, 0xff0099, 0x99ff00, 0x0099ff
+            ];
+            return colors[Math.floor(Math.random() * colors.length)];
+        }
+        
+        // Запуск игры
+        init();
+    </script>
+</body>
+</html>
+const express = require('express');
+const socketio = require('socket.io');
+const http = require('http');
+
+const app = express();
+const server = http.createServer(app);
+const io = socketio(server);
+
+const PORT = process.env.PORT || 3000;
+
+let gameState = {
+    snakes: {},
+    apples: []
+};
+
+// Генерация случайной позиции
+function getRandomPosition(gridSize, exclude = []) {
+    let x, z;
+    let positionValid = false;
+    
+    while (!positionValid) {
+        x = Math.floor(Math.random() * gridSize);
+        z = Math.floor(Math.random() * gridSize);
+        positionValid = true;
+        
+        for (const pos of exclude) {
+            if (pos.x === x && pos.z === z) {
+                positionValid = false;
+                break;
+            }
+        }
+    }
+    
+    return { x, z };
+}
+
+// Обновление игрового состояния
+function updateGameState() {
+    // Движение змеек
+    for (const snakeId in gameState.snakes) {
+        const snake = gameState.snakes[snakeId];
+        const head = snake.body[0];
+        
+        const newHead = {
+            x: head.x + snake.direction.x,
+            y: head.y + snake.direction.y,
+            z: head.z + snake.direction.z
+        };
+        
+        snake.body.unshift(newHead);
+        
+        // Проверка съедения яблока
+        let appleEaten = -1;
+        for (let i = 0; i < gameState.apples.length; i++) {
+            if (newHead.x === gameState.apples[i].x && newHead.z === gameState.apples[i].z) {
+                appleEaten = i;
+                break;
+            }
+        }
+        
+        if (appleEaten !== -1) {
+            snake.score++;
+            gameState.apples.splice(appleEaten, 1);
+            
+            // Добавление нового яблока
+            const allSegments = [];
+            for (const sId in gameState.snakes) {
+                allSegments.push(...gameState.snakes[sId].body);
+            }
+            
+            const newApplePos = getRandomPosition(20, [...gameState.apples, ...allSegments]);
+            gameState.apples.push(newApplePos);
+        } else {
+            snake.body.pop();
+        }
+    }
+    
+    // Отправка обновленного состояния всем клиентам
+    io.emit('gameState', gameState);
+}
+
+// Таймер обновления игры
+setInterval(updateGameState, 150);
+
+io.on('connection', (socket) => {
+    console.log('New client connected');
+    
+    // Новый игрок
+    socket.on('join', (data) => {
+        const snakeId = socket.id;
+        const color = `#${Math.floor(Math.random()*16777215).toString(16)}`;
+        
+        // Начальная позиция
+        const allSegments = [];
+        for (const sId in gameState.snakes) {
+            allSegments.push(...gameState.snakes[sId].body);
+        }
+        
+        const initialPos = getRandomPosition(20, [...gameState.apples, ...allSegments]);
+        
+        gameState.snakes[snakeId] = {
+            id: snakeId,
+            name: data.name,
+            color: color,
+            body: [
+                initialPos,
+                { x: initialPos.x - 1, y: 0, z: initialPos.z }
+            ],
+            direction: { x: 1, y: 0, z: 0 },
+            score: 0
+        };
+        
+        // Уведомление других игроков
+        socket.broadcast.emit('playerJoined', gameState.snakes[snakeId]);
+        
+        // Отправка текущего состояния новому игроку
+        socket.emit('gameState', gameState);
+    });
+    
+    // Изменение направления
+    socket.on('direction', (direction) => {
+        if (gameState.snakes[socket.id]) {
+            gameState.snakes[socket.id].nextDirection = direction;
+        }
+    });
+    
+    // Столкновение
+    socket.on('collision', () => {
+        if (gameState.snakes[socket.id]) {
+            delete gameState.snakes[socket.id];
+            io.emit('playerLeft', socket.id);
+        }
+    });
+    
+    // Отключение игрока
+    socket.on('disconnect', () => {
+        if (gameState.snakes[socket.id]) {
+            delete gameState.snakes[socket.id];
+            io.emit('playerLeft', socket.id);
+        }
+    });
+});
+
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
